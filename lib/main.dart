@@ -1,11 +1,20 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import 'supabase_config.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Supabase.initialize(
+    url: supabaseUrl,
+    anonKey: publishableKey,
+  );
+
   runApp(const TodoApp());
 }
+
+final supabase = Supabase.instance.client;
 
 class TodoApp extends StatelessWidget {
   const TodoApp({super.key});
@@ -22,10 +31,199 @@ class TodoApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFFFBF7F8),
         useMaterial3: true,
       ),
-      home: const TodoPage(),
+      home: const AuthGate(),
     );
   }
 }
+
+// Menentukan halaman berdasarkan status login.
+// Supabase akan memulihkan sesi yang tersimpan otomatis.
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<AuthState>(
+      stream: supabase.auth.onAuthStateChange,
+      builder: (context, snapshot) {
+        final session = supabase.auth.currentSession;
+
+        if (session == null) {
+          return const LoginPage();
+        }
+
+        return const TodoPage();
+      },
+    );
+  }
+}
+
+// ================= LOGIN =================
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+
+  bool loading = false;
+  bool obscurePassword = true;
+  String? errorMessage;
+
+  Future<void> login() async {
+    final email = emailController.text.trim();
+    final password = passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      setState(() {
+        errorMessage = 'Email dan password harus diisi.';
+      });
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      errorMessage = null;
+    });
+
+    try {
+      await supabase.auth.signInWithPassword(
+        email: email,
+        password: password,
+      );
+      // AuthGate akan berpindah ke halaman To-Do List.
+    } on AuthException catch (e) {
+      setState(() {
+        errorMessage = e.message;
+      });
+    } catch (e) {
+      setState(() {
+        errorMessage = 'Terjadi kesalahan: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(
+                  Icons.task_alt,
+                  size: 70,
+                  color: Color(0xFFD88FA5),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'To-Do List',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Login untuk mengelola tugas kamu',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+
+                TextField(
+                  controller: emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    prefixIcon: Icon(Icons.email_outlined),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                TextField(
+                  controller: passwordController,
+                  obscureText: obscurePassword,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        obscurePassword
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          obscurePassword = !obscurePassword;
+                        });
+                      },
+                    ),
+                  ),
+                  onSubmitted: (_) => login(),
+                ),
+                const SizedBox(height: 16),
+
+                if (errorMessage != null)
+                  Text(
+                    errorMessage!,
+                    style: const TextStyle(color: Colors.red),
+                    textAlign: TextAlign.center,
+                  ),
+
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: loading ? null : login,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFD88FA5),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                  ),
+                  child: loading
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text('Login'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================= TO-DO LIST =================
 
 class TodoPage extends StatefulWidget {
   const TodoPage({super.key});
@@ -35,168 +233,118 @@ class TodoPage extends StatefulWidget {
 }
 
 class _TodoPageState extends State<TodoPage> {
-  final TextEditingController _controller =
-      TextEditingController();
+  final taskController = TextEditingController();
 
-  List<dynamic> _tasks = [];
-  bool _loading = false;
-  String? _error;
+  List<Map<String, dynamic>> tasks = [];
+  bool loading = true;
+  String? errorMessage;
 
-  Map<String, String> get _headers => {
-        'apikey': publishableKey,
-        'Authorization': 'Bearer $anonKey',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      };
-
-  Uri get _tasksUrl => Uri.parse(
-        '$supabaseUrl/rest/v1/tasks',
-      );
+  User get currentUser => supabase.auth.currentUser!;
 
   @override
   void initState() {
     super.initState();
-    _loadTasks();
+    loadTasks();
   }
 
-  // GET: mengambil daftar tugas
-  Future<void> _loadTasks() async {
+  // GET: mengambil tugas milik user yang sedang login.
+  Future<void> loadTasks() async {
     setState(() {
-      _loading = true;
-      _error = null;
+      loading = true;
+      errorMessage = null;
     });
 
     try {
-      final response = await http.get(
-        _tasksUrl.replace(
-          queryParameters: {
-            'select': '*',
-            'order': 'id.desc',
-          },
-        ),
-        headers: _headers,
-      );
+      final data = await supabase
+          .from('tasks')
+          .select()
+          .eq('user_id', currentUser.id)
+          .order('id', ascending: false);
 
-      if (response.statusCode == 200) {
-        setState(() {
-          _tasks = jsonDecode(response.body) as List<dynamic>;
-        });
-      } else {
-        throw Exception(
-          'Gagal mengambil tugas (${response.statusCode}): '
-          '${response.body}',
-        );
-      }
+      setState(() {
+        tasks = List<Map<String, dynamic>>.from(data);
+      });
     } catch (e) {
       setState(() {
-        _error = e.toString();
+        errorMessage = 'Gagal mengambil data: $e';
       });
     } finally {
       if (mounted) {
         setState(() {
-          _loading = false;
+          loading = false;
         });
       }
     }
   }
 
-  // POST: menambahkan tugas
-  Future<void> _addTask() async {
-    final title = _controller.text.trim();
+  // POST: menambahkan tugas untuk user yang sedang login.
+  Future<void> addTask() async {
+    final title = taskController.text.trim();
 
     if (title.isEmpty) {
-      _showMessage('Nama tugas belum diisi.');
+      showMessage('Nama tugas belum diisi.');
       return;
     }
 
     try {
-      final response = await http.post(
-        _tasksUrl,
-        headers: {
-          ..._headers,
-          'Prefer': 'return=representation',
-        },
-        body: jsonEncode({
-          'title': title,
-          'is_completed': false,
-        }),
-      );
+      await supabase.from('tasks').insert({
+        'title': title,
+        'is_completed': false,
+        'user_id': currentUser.id,
+      });
 
-      if (response.statusCode == 201 ||
-          response.statusCode == 200) {
-        _controller.clear();
-        await _loadTasks();
-        _showMessage('Tugas berhasil ditambahkan!');
-      } else {
-        throw Exception(
-          'Gagal menambahkan tugas (${response.statusCode}): '
-          '${response.body}',
-        );
-      }
+      taskController.clear();
+      await loadTasks();
+      showMessage('Tugas berhasil ditambahkan.');
     } catch (e) {
-      _showMessage(e.toString());
+      showMessage('Gagal menambahkan tugas: $e');
     }
   }
 
-  // PATCH: mengubah status tugas
-  Future<void> _toggleTask(
+  // PATCH: mengubah status tugas.
+  Future<void> toggleTask(
     int id,
-    bool isCompleted,
+    bool completed,
   ) async {
     try {
-      final response = await http.patch(
-        _tasksUrl.replace(
-          queryParameters: {'id': 'eq.$id'},
-        ),
-        headers: {
-          ..._headers,
-          'Prefer': 'return=representation',
-        },
-        body: jsonEncode({
-          'is_completed': isCompleted,
-        }),
-      );
+      await supabase
+          .from('tasks')
+          .update({'is_completed': completed})
+          .eq('id', id)
+          .eq('user_id', currentUser.id);
 
-      if (response.statusCode == 200 ||
-          response.statusCode == 204) {
-        await _loadTasks();
-      } else {
-        throw Exception(
-          'Gagal mengubah tugas (${response.statusCode}): '
-          '${response.body}',
-        );
-      }
+      await loadTasks();
     } catch (e) {
-      _showMessage(e.toString());
+      showMessage('Gagal mengubah tugas: $e');
     }
   }
 
-  // DELETE: menghapus tugas
-  Future<void> _deleteTask(int id) async {
+  // DELETE: menghapus tugas milik user.
+  Future<void> deleteTask(int id) async {
     try {
-      final response = await http.delete(
-        _tasksUrl.replace(
-          queryParameters: {'id': 'eq.$id'},
-        ),
-        headers: _headers,
-      );
+      await supabase
+          .from('tasks')
+          .delete()
+          .eq('id', id)
+          .eq('user_id', currentUser.id);
 
-      if (response.statusCode == 200 ||
-          response.statusCode == 204) {
-        await _loadTasks();
-        _showMessage('Tugas berhasil dihapus.');
-      } else {
-        throw Exception(
-          'Gagal menghapus tugas (${response.statusCode}): '
-          '${response.body}',
-        );
-      }
+      await loadTasks();
+      showMessage('Tugas berhasil dihapus.');
     } catch (e) {
-      _showMessage(e.toString());
+      showMessage('Gagal menghapus tugas: $e');
     }
   }
 
-  void _showMessage(String message) {
+  Future<void> logout() async {
+    try {
+      await supabase.auth.signOut();
+      // AuthGate akan kembali menampilkan LoginPage.
+    } catch (e) {
+      showMessage('Gagal logout: $e');
+    }
+  }
+
+  void showMessage(String message) {
     if (!mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -206,15 +354,15 @@ class _TodoPageState extends State<TodoPage> {
 
   @override
   void dispose() {
-    _controller.dispose();
+    taskController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final completedCount = _tasks.where(
-      (task) => task['is_completed'] == true,
-    ).length;
+    final completedCount = tasks
+        .where((task) => task['is_completed'] == true)
+        .length;
 
     return Scaffold(
       appBar: AppBar(
@@ -223,6 +371,13 @@ class _TodoPageState extends State<TodoPage> {
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         backgroundColor: const Color(0xFFFBF7F8),
+        actions: [
+          IconButton(
+            tooltip: 'Logout',
+            onPressed: logout,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(20),
@@ -237,8 +392,15 @@ class _TodoPageState extends State<TodoPage> {
               ),
             ),
             const SizedBox(height: 6),
+
             Text(
-              '$completedCount dari ${_tasks.length} tugas selesai',
+              'Login sebagai: ${currentUser.email ?? '-'}',
+              style: const TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 4),
+
+            Text(
+              '$completedCount dari ${tasks.length} tugas selesai',
               style: const TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 20),
@@ -247,7 +409,7 @@ class _TodoPageState extends State<TodoPage> {
               children: [
                 Expanded(
                   child: TextField(
-                    controller: _controller,
+                    controller: taskController,
                     decoration: InputDecoration(
                       hintText: 'Masukkan tugas baru...',
                       filled: true,
@@ -257,12 +419,12 @@ class _TodoPageState extends State<TodoPage> {
                         borderSide: BorderSide.none,
                       ),
                     ),
-                    onSubmitted: (_) => _addTask(),
+                    onSubmitted: (_) => addTask(),
                   ),
                 ),
                 const SizedBox(width: 10),
                 IconButton.filled(
-                  onPressed: _addTask,
+                  onPressed: addTask,
                   icon: const Icon(Icons.add),
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFFD88FA5),
@@ -272,52 +434,42 @@ class _TodoPageState extends State<TodoPage> {
                 ),
               ],
             ),
-
             const SizedBox(height: 20),
 
             Expanded(
-              child: _loading
+              child: loading
                   ? const Center(
                       child: CircularProgressIndicator(),
                     )
-                  : _error != null && _tasks.isEmpty
+                  : errorMessage != null
                       ? Center(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(
-                                Icons.cloud_off,
-                                size: 42,
-                              ),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Data belum bisa dimuat.',
-                              ),
-                              const SizedBox(height: 8),
                               Text(
-                                _error!,
+                                errorMessage!,
                                 textAlign: TextAlign.center,
                               ),
-                              const SizedBox(height: 12),
+                              const SizedBox(height: 10),
                               ElevatedButton(
-                                onPressed: _loadTasks,
+                                onPressed: loadTasks,
                                 child: const Text('Coba Lagi'),
                               ),
                             ],
                           ),
                         )
-                      : _tasks.isEmpty
+                      : tasks.isEmpty
                           ? const Center(
                               child: Text(
                                 'Belum ada tugas. Yuk, tambahkan!',
                               ),
                             )
                           : RefreshIndicator(
-                              onRefresh: _loadTasks,
+                              onRefresh: loadTasks,
                               child: ListView.builder(
-                                itemCount: _tasks.length,
+                                itemCount: tasks.length,
                                 itemBuilder: (context, index) {
-                                  final task = _tasks[index];
+                                  final task = tasks[index];
                                   final id = task['id'] as int;
                                   final title =
                                       task['title'] as String;
@@ -336,7 +488,7 @@ class _TodoPageState extends State<TodoPage> {
                                             const Color(0xFFD88FA5),
                                         onChanged: (value) {
                                           if (value != null) {
-                                            _toggleTask(id, value);
+                                            toggleTask(id, value);
                                           }
                                         },
                                       ),
@@ -344,8 +496,7 @@ class _TodoPageState extends State<TodoPage> {
                                         title,
                                         style: TextStyle(
                                           decoration: completed
-                                              ? TextDecoration
-                                                  .lineThrough
+                                              ? TextDecoration.lineThrough
                                               : TextDecoration.none,
                                         ),
                                       ),
@@ -354,8 +505,7 @@ class _TodoPageState extends State<TodoPage> {
                                           Icons.delete_outline,
                                           color: Colors.redAccent,
                                         ),
-                                        onPressed: () =>
-                                            _deleteTask(id),
+                                        onPressed: () => deleteTask(id),
                                       ),
                                     ),
                                   );
